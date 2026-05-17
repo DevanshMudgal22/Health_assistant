@@ -1,10 +1,11 @@
 langchain
+langchain-core
 langchain-groq
 langchain-community
+langchain-tavily
 langgraph
 supabase
 python-dotenv
-tavily-python
 fastapi
 uvicorn
 pydantic
@@ -12,7 +13,4 @@ psycopg2-binary
 sqlalchemy
 sentence-transformers
 langchain-huggingface
-streamlit
-
-
-
+httpx
