@@ -30,13 +30,19 @@ def router_node(state: AgentState):
 
     text = messages[-1].content.lower()
 
-    incognito = state.get("incognito", False)           # ✅ INCOGNITO
-    if not incognito:
-        save_message(session_id, "user", messages[-1].content)
+    save_message(session_id, "user", messages[-1].content)
     count = get_message_count(session_id)
 
-    if any(x in text for x in ["hi", "hello", "hey", "how are you"]):
-        return {"intent": "general_info", "message_count": count}
+    if any(x in text for x in ["hi", "hello", "hey", "how are you", "hii", "helo", "hlo"]):
+        reply = "👋 Hello! Main HealthPilot AI hoon — aapka personal health assistant.\n\nAaj main aapki kya madad kar sakta hoon? Apni problem batayein. 🩺"
+        incognito = state.get("incognito", False)
+        if not incognito:
+            save_message(session_id, "assistant", reply)
+        return {
+            "intent": "greeting_done",
+            "message_count": count,
+            "messages": messages + [AIMessage(content=reply)],
+        }
 
     if any(x in text for x in [
         "can't breathe", "chest pain", "heart attack",
@@ -104,9 +110,7 @@ Do NOT include any explanation outside the JSON."""),
 
         q1    = questions[0]
         reply = f"Before I give you advice, I have a couple of quick questions:\n\n1. {q1}"
-        incognito = state.get("incognito", False)         # ✅ INCOGNITO
-        if not incognito:
-            save_message(session_id, "assistant", reply)
+        save_message(session_id, "assistant", reply)
 
         return {
             "messages":               messages + [AIMessage(content=reply)],
@@ -124,9 +128,7 @@ Do NOT include any explanation outside the JSON."""),
         if len(questions) >= 2:
             q2    = questions[1]
             reply = f"2. {q2}"
-            incognito = state.get("incognito", False)       # ✅ INCOGNITO
-            if not incognito:
-                save_message(session_id, "assistant", reply)
+            save_message(session_id, "assistant", reply)
             return {
                 "messages":               messages + [AIMessage(content=reply)],
                 "clarification_needed":   True,
@@ -157,11 +159,6 @@ Do NOT include any explanation outside the JSON."""),
 # =====================================================
 
 def summarization_node(state: AgentState):
-    # ✅ INCOGNITO — skip all DB saves
-    if state.get("incognito", False):
-        print("[Summarizer] Skipping — incognito mode")
-        return {}
-
     session_id = state.get("session_id", "default")
 
     # ✅ FIX 1: ALWAYS get fresh message count from DB (state value is stale)
@@ -247,9 +244,7 @@ def safety_node(state: AgentState):
             "- Ambulance: 108 (India)\n\n"
             "Do not wait — go now or call for help immediately."
         )
-        incognito = state.get("incognito", False)         # ✅ INCOGNITO
-        if not incognito:
-            save_message(session_id, "assistant", reply)
+        save_message(session_id, "assistant", reply)
         return {
             "messages": state.get("messages", []) + [AIMessage(content=reply)],
             "error": "emergency"
@@ -496,8 +491,7 @@ INSTRUCTIONS:
 - Group similar items (e.g., pain relief, antibiotics, specialists).
 - Mention important details like price, availability, and prescription requirement naturally in sentences.
 - Highlight the most useful or relevant options instead of listing everything mechanically.
-- If something is out of stock, mention it clearly.
-- Keep the response structured but conversational.
+- Keep the response structured.
 
 STYLE:
 - Write like a doctor explaining options to a patient.
@@ -516,26 +510,29 @@ OUTPUT:
 - The first line should feel like a continuation of the conversation
 """
     else:
-        system_prompt = """You are HealthPilot AI, a professional medical and lifestyle consultant providing high-quality, evidence-based health insights.
+        system_prompt = """You are HealthPilot AI, a professional medical consultant.
 
-CONVERSATIONAL FLOW:
-1. GREETINGS: If the user says Hi, Hello, or Hey — respond professionally and ask how you can assist with their health today.
-2. CLARIFICATION RULE: Before giving medical advice, ask 2-3 brief targeted clinical questions (onset, severity, current medications).
-3. DETAIL RULE: Only AFTER the user answers, provide a comprehensive professional response with specific actionable steps, dosages, and lifestyle changes.
-4. TOPIC RESTRICTION: If the user asks about anything unrelated to health, politely state you are a specialized medical assistant.
+STRICT RULES — FOLLOW EXACTLY:
+1. NEVER greet the user again. Never say Hello or Hi in your response.
+2. NEVER ask more questions. The clarification is already done. Give the answer directly.
+3. Give a DIRECT, POINT-TO-POINT response based on the user's symptoms and context provided.
+4. Use this structure ALWAYS:
+   🔍 Possible Cause: (1-2 lines)
+   💊 Treatment: (specific medicines, dosage)
+   🥗 Diet & Lifestyle: (2-3 points)
+   ⚠️ Warning Signs: (when to see a doctor)
+5. TOPIC RESTRICTION: Only answer health related questions.
+6. Keep it SHORT and USEFUL. No fluff. No filler sentences.
 
 LANGUAGE RULE:
-- Detect the user's language automatically.
 - Always respond in the SAME language as the user.
-- If the user mixes languages (e.g., Hinglish), respond naturally in the same style.
+- Hinglish user → Hinglish reply. Hindi user → Hindi reply. English user → English reply.
 
-TONE AND CONSTRAINTS:
-- Clinical, authoritative, and fluff-free.
-- Use medical terms but remain clear and easy to understand.
-- No markdown: STRICTLY NO #, ##, **, or bullet lists. Use plain text only.
+TONE:
+- Like a doctor giving quick, clear advice.
+- No markdown (#, **, ---). Plain text + emojis only.
 - No disclaimers. No "consult a doctor". No "I am an AI".
-- Use relevant emojis to structure sections naturally.
-- Personalize using the user's duration, symptoms, and conditions from context.
+- Never repeat or rephrase what the user said back to them.
 - Never invent medical facts.
 """
 
@@ -557,8 +554,6 @@ TONE AND CONSTRAINTS:
     print(response)
     print(f"{'='*50}\n")
 
-    incognito = state.get("incognito", False)             # ✅ INCOGNITO
-    if not incognito:
-        save_message(session_id, "assistant", response)
+    save_message(session_id, "assistant", response)
 
     return {"messages": messages + [AIMessage(content=response)]}
