@@ -1,12 +1,12 @@
 services:
   - type: web
-    name: healthpilot-ai
-    env: python
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+    name: health-assistant
+    runtime: python
+    region: singapore
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.9
       - key: GROQ_API_KEY
         sync: false
       - key: SUPABASE_URL
