@@ -45,10 +45,23 @@ def router_node(state: AgentState):
         }
 
     if any(x in text for x in [
-        "can't breathe", "chest pain", "heart attack",
-        "faint", "unconscious", "bleeding heavily", "stroke",
-        "seizure", "overdose", "breathing difficulty",
-    ]):
+    # breathing
+    "can't breathe", "cannot breathe", "breathing difficulty", "shortness of breath", "choking",
+    # heart
+    "chest pain", "heart attack", "heart failure", "palpitations", "irregular heartbeat",
+    # consciousness
+    "faint", "fainting", "unconscious", "passed out", "unresponsive", "collapsed",
+    # bleeding
+    "bleeding heavily", "heavy bleeding", "blood loss", "hemorrhage", "bleeding won't stop",
+    # brain
+    "stroke", "seizure", "convulsion", "paralysis", "sudden numbness", "can't speak",
+    # overdose / poisoning
+    "overdose", "poisoning", "swallowed poison", "took too many pills",
+    # trauma
+    "accident", "head injury", "broken bone", "deep cut", "severe burn",
+    # other critical
+    "suicide", "kill myself", "self harm", "allergic reaction", "anaphylaxis", "swelling throat",
+]):
         return {"intent": "emergency", "message_count": count}
 
     if any(x in text for x in [
@@ -79,18 +92,19 @@ def clarification_node(state: AgentState):
     messages                = state.get("messages", [])
     session_id              = state.get("session_id", "default")
     clarification_step      = state.get("clarification_step", 0)
-    clarification_questions = state.get("clarification_questions", [])
     clarification_answers   = state.get("clarification_answers", {}) or {}
 
     user_input = messages[-1].content if messages else ""
 
-    # ── Step 0: Generate questions ──
+    # ── Step 0: Generate 1 question ──
     if clarification_step == 0:
         gen_prompt = ChatPromptTemplate.from_messages([
             ("system", """You are HealthPilot AI.
-The user described a health concern. Generate exactly 2 short, focused clarifying questions.
-Return ONLY valid JSON: {{"questions": ["Q1", "Q2"]}}
-Do NOT include any explanation outside the JSON."""),
+User described a health concern. Generate exactly 1 short, focused clarifying question.
+Only ask if the query is too vague to answer safely (e.g. just "pain" or "problem").
+If query is clear enough, return: {{"questions": []}}
+Return ONLY valid JSON: {{"questions": ["Q1"]}}
+No explanation outside JSON."""),
             ("user", "{complaint}")
         ])
 
@@ -98,53 +112,32 @@ Do NOT include any explanation outside the JSON."""),
 
         try:
             result    = chain.invoke({"complaint": user_input})
-            questions = result.get("questions", [])[:2]
+            questions = result.get("questions", [])[:1]
         except Exception:
-            questions = [
-                "How long have you been experiencing this symptom?",
-                "Do you have any existing medical conditions or allergies?",
-            ]
+            questions = ["How long have you been experiencing this, and where exactly?"]
 
+        # Query clear hai — skip clarification, direct answer
         if not questions:
-            return {"clarification_needed": False, "clarification_step": 0, "clarification_questions": []}
+            return {
+                "clarification_needed": False,
+                "clarification_step":   0,
+                "clarification_questions": [],
+            }
 
-        q1    = questions[0]
-        reply = f"Before I give you advice, I have a couple of quick questions:\n\n1. {q1}"
+        reply = questions[0]
         save_message(session_id, "assistant", reply)
 
         return {
-            "messages":               messages + [AIMessage(content=reply)],
-            "clarification_needed":   True,
+            "messages":                messages + [AIMessage(content=reply)],
+            "clarification_needed":    True,
             "clarification_questions": questions,
-            "clarification_step":     1,
-            "clarification_answers":  {},
+            "clarification_step":      1,
+            "clarification_answers":   {},
         }
 
-    # ── Step 1: Store Q1 answer, ask Q2 ──
+    # ── Step 1: User ne jawab diya — done, answer do ──
     elif clarification_step == 1:
         clarification_answers["q1"] = user_input
-        questions = clarification_questions
-
-        if len(questions) >= 2:
-            q2    = questions[1]
-            reply = f"2. {q2}"
-            save_message(session_id, "assistant", reply)
-            return {
-                "messages":               messages + [AIMessage(content=reply)],
-                "clarification_needed":   True,
-                "clarification_step":     2,
-                "clarification_answers":  clarification_answers,
-            }
-        else:
-            return {
-                "clarification_needed":  False,
-                "clarification_step":    0,
-                "clarification_answers": clarification_answers,
-            }
-
-    # ── Step 2: Store Q2 answer, done ──
-    elif clarification_step == 2:
-        clarification_answers["q2"] = user_input
         return {
             "clarification_needed":  False,
             "clarification_step":    0,
@@ -479,61 +472,48 @@ def response_node(state: AgentState):
     context_str = "\n\n".join(context_parts)
 
     if intent == "data_query":
-        system_prompt = """You are HealthPilot AI, a professional medical consultant.
+        system_prompt = """You are HealthPilot AI — a concise medical assistant.
 
-DATABASE TASK — STRICT RULES:
-DATABASE TASK:
-You are given DATABASE RESULTS containing medicines or doctors.
+ROLE: Present database results as a smart, brief recommendation — not a dump.
 
-INSTRUCTIONS:
-- DO NOT display the raw database format.
-- Convert the results into a natural, human-friendly explanation.
-- Group similar items (e.g., pain relief, antibiotics, specialists).
-- Mention important details like price, availability, and prescription requirement naturally in sentences.
-- Highlight the most useful or relevant options instead of listing everything mechanically.
-- Keep the response structured.
+RULES:
+- Only answer from the provided database results. If results are empty or irrelevant, say so briefly.
+- Never show raw data, IDs, or field names.
+- Skip items that don't match the query.
+- Max 3–5 items unless user asks for more.
+- Prioritize relevance: best match first.
 
-STYLE:
-- Write like a doctor explaining options to a patient.
-- Use simple, clear, natural language.
-- No markdown (#, **, etc.)
-- Use light emojis where helpful.
-- Avoid robotic or repetitive formatting.
+FORMAT:
+- Lead with one short line (what you found).
+- List only key info: name, price, availability, Rx-required — inline, not stacked.
+- Group only if 3+ items share a category.
+- End with one practical tip or next step (optional, only if useful).
+- No markdown. No headers. Light emoji ok.
 
-LANGUAGE RULE:
-- Detect the user's language automatically.
-- Always respond in the SAME language as the user.
-- If the user mixes languages (e.g., Hinglish), respond naturally in the same style.
+TONE: Confident, brief, helpful — like a pharmacist giving a quick answer.
 
-OUTPUT:
-- A clean, helpful explanation — NOT a raw list.
-- The first line should feel like a continuation of the conversation
+LANGUAGE: Match user's language/style exactly (Hindi, English, Hinglish — mirror it).
 """
     else:
-        system_prompt = """You are HealthPilot AI, a professional medical consultant.
+        system_prompt = """You are HealthPilot AI — a sharp, experienced doctor giving quick clinic-style advice.
 
-STRICT RULES — FOLLOW EXACTLY:
-1. NEVER greet the user again. Never say Hello or Hi in your response.
-2. NEVER ask more questions. The clarification is already done. Give the answer directly.
-3. Give a DIRECT, POINT-TO-POINT response based on the user's symptoms and context provided.
-4. Use this structure ALWAYS:
-   🔍 Possible Cause: (1-2 lines)
-   💊 Treatment: (specific medicines, dosage)
-   🥗 Diet & Lifestyle: (2-3 points)
-   ⚠️ Warning Signs: (when to see a doctor)
-5. TOPIC RESTRICTION: Only answer health related questions.
-6. Keep it SHORT and USEFUL. No fluff. No filler sentences.
+RULES:
+- Answer directly. No greetings, no clarifying questions, no rephrasing the user's words back.
+- Health topics only. Off-topic? One line decline, nothing more.
+- Never say "consult a doctor", "I'm an AI", or add disclaimers.
+- Never invent facts. If unsure, say so in one line.
 
-LANGUAGE RULE:
-- Always respond in the SAME language as the user.
-- Hinglish user → Hinglish reply. Hindi user → Hindi reply. English user → English reply.
+FORMAT (use only what's relevant):
+🔍 [Likely cause — 1 line]
+💊 [Treatment / medicine + dosage if applicable]
+🥗 [Diet or lifestyle tip — only if useful]
+⚠️ [Red flag — only if genuinely urgent]
 
-TONE:
-- Like a doctor giving quick, clear advice.
-- No markdown (#, **, ---). Plain text + emojis only.
-- No disclaimers. No "consult a doctor". No "I am an AI".
-- Never repeat or rephrase what the user said back to them.
-- Never invent medical facts.
+LENGTH: 4–6 lines max. Cut anything that doesn't add value.
+
+TONE: Confident, warm, direct — like a doctor in a 5-minute consult.
+
+LANGUAGE: Mirror the user exactly — Hinglish, Hindi, English, whatever they use.
 """
 
     prompt = ChatPromptTemplate.from_messages([
