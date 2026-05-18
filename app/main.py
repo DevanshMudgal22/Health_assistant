@@ -22,18 +22,17 @@ graph = define_graph()
 
 class ChatRequest(BaseModel):
     message: str
-    session_id: str = None          # pass existing session_id to continue a chat
-    clarification_step: int = 0     # pass current clarification step
+    session_id: str = None
+    clarification_step: int = 0
     clarification_questions: list = []
     clarification_answers: dict = {}
-    incognito: bool = False 
+    incognito: bool = False
 
 
 class ChatResponse(BaseModel):
     response: str
     session_id: str
-    is_emergency: bool = False    
-    is_emergency: bool = False    
+    is_emergency: bool = False          # deduplicated (was declared twice before)
     clarification_needed: bool = False
     clarification_step: int = 0
     clarification_questions: list = []
@@ -98,26 +97,32 @@ def chat(req: ChatRequest):
         "clarification_questions": req.clarification_questions,
         "clarification_answers":   req.clarification_answers,
         "clarification_needed":    False,
-        "incognito":               req.incognito,   
+        "incognito":               req.incognito,
     }
 
     # ── Run LangGraph ──
     result = graph.invoke(state)
 
     # ── Extract AI Response ──
-    messages = result.get("messages", [])
+    messages    = result.get("messages", [])
     ai_messages = [m for m in messages if isinstance(m, AIMessage)]
-    response_text = ai_messages[-1].content if ai_messages else "I'm sorry, I couldn't generate a response."
+    response_text = (
+        ai_messages[-1].content
+        if ai_messages
+        else "I'm sorry, I couldn't generate a response."
+    )
 
-    # ── Detect emergency from graph result ──         
-    is_emergency = (result.get("intent") == "emergency") or \
-                   ("emergency" in (result.get("error") or "").lower())
+    # ── Detect emergency ──
+    is_emergency = (
+        result.get("intent") == "emergency"
+        or "emergency" in (result.get("error") or "").lower()
+    )
 
     # ── Return response + clarification state for frontend ──
     return ChatResponse(
         response=response_text,
         session_id=session_id,
-        is_emergency=is_emergency,    
+        is_emergency=is_emergency,
         clarification_needed=result.get("clarification_needed", False),
         clarification_step=result.get("clarification_step", 0),
         clarification_questions=result.get("clarification_questions", []),
@@ -126,15 +131,12 @@ def chat(req: ChatRequest):
 
 
 # =====================================================
-# SESSION HISTORY ENDPOINT (OPTIONAL / DEBUG)
+# SESSION HISTORY ENDPOINT
 # =====================================================
 
 @app.get("/history/{session_id}")
 def get_history(session_id: str):
-    """
-    Returns recent messages for a session.
-    Useful for frontend to restore chat history.
-    """
+    """Returns recent messages for a session."""
     messages = load_recent_messages(session_id, limit=50)
     summary  = load_summary(session_id)
 
@@ -151,10 +153,7 @@ def get_history(session_id: str):
 
 @app.delete("/clear/{session_id}")
 def clear_chat(session_id: str):
-    """
-    Deletes all messages and summary for a session from Supabase.
-    Called when user taps the clear/delete button in the app.
-    """
+    """Deletes all messages and summary for a session from Supabase."""
     success = clear_session(session_id)
     if success:
         return {"status": "cleared", "session_id": session_id}

@@ -1,3 +1,6 @@
+import re
+import json
+
 from app.state import AgentState
 from app.tools import get_search_tool
 from app.rag import get_retriever
@@ -24,20 +27,40 @@ SUMMARIZE_EVERY = 4
 def router_node(state: AgentState):
     messages   = state.get("messages", [])
     session_id = state.get("session_id", "default")
+    incognito  = state.get("incognito", False)
 
     if not messages:
         return {"intent": "general_info"}
 
     text = messages[-1].content.lower().strip()
 
-    save_message(session_id, "user", messages[-1].content)
+    # ── Save user message (skip if incognito) ──
+    if not incognito:
+        save_message(session_id, "user", messages[-1].content)
+
     count = get_message_count(session_id)
 
-    # ── GREETING: exact word match to avoid false triggers (e.g. "history", "thigh") ──
+    # ── EMERGENCY FIRST: must be checked before greetings/acks ──
+    # Critical: a message like "ok I'm having chest pain" must never match ack first
+    if any(x in text for x in [
+        "can't breathe", "cannot breathe", "breathing difficulty", "shortness of breath", "choking",
+        "chest pain", "heart attack", "heart failure", "palpitations", "irregular heartbeat",
+        "faint", "fainting", "unconscious", "passed out", "unresponsive", "collapsed",
+        "bleeding heavily", "heavy bleeding", "blood loss", "hemorrhage", "bleeding won't stop",
+        "stroke", "seizure", "convulsion", "paralysis", "sudden numbness", "can't speak",
+        "overdose", "poisoning", "swallowed poison", "took too many pills",
+        "head injury", "broken bone", "deep cut", "severe burn",
+        "suicide", "kill myself", "self harm", "allergic reaction", "anaphylaxis", "swelling throat",
+    ]):
+        return {"intent": "emergency", "message_count": count}
+
+    # ── GREETING: exact or prefix match only ──
     greeting_words = ["hi", "hello", "hey", "hii", "helo", "hlo"]
-    if any(text == x or text.startswith(x) for x in greeting_words) or "how are you" in text:
-        reply = "👋 Hello! Main HealthPilot AI hoon — aapka personal health assistant.\n\nAaj main aapki kya madad kar sakta hoon? Apni problem batayein. 🩺"
-        incognito = state.get("incognito", False)
+    if any(text == x or text.startswith(x + " ") for x in greeting_words) or text == "how are you":
+        reply = (
+            "👋 Hello! Main HealthPilot AI hoon — aapka personal health assistant.\n\n"
+            "Aaj main aapki kya madad kar sakta hoon? Apni problem batayein. 🩺"
+        )
         if not incognito:
             save_message(session_id, "assistant", reply)
         return {
@@ -46,46 +69,25 @@ def router_node(state: AgentState):
             "messages": messages + [AIMessage(content=reply)],
         }
 
-    # ── ACKNOWLEDGEMENT: thanks, ok, accha — short reply, no LLM needed ──
-    # FIX: "Thanks" pe bekar generic response aata tha, ab short warm reply dega
-    if any(x in text for x in [
+    # ── ACKNOWLEDGEMENT: short filler messages only ──
+    # Only trigger if the ENTIRE message is an ack — not if it contains medical words too
+    ack_phrases = [
         "thanks", "thank you", "ok", "okay", "got it",
         "sure", "alright", "thik hai", "shukriya",
         "theek", "accha", "haan", "👍", "hmm", "fine",
         "bahut acha", "perfect", "great", "awesome",
-    ]):
+    ]
+    if any(text == x or text == x + "!" or text == x + "." for x in ack_phrases):
         reply = "😊 Koi baat nahi! Kuch aur poochna ho toh batao."
-        save_message(session_id, "assistant", reply)
+        if not incognito:
+            save_message(session_id, "assistant", reply)
         return {
             "intent": "greeting_done",
             "message_count": count,
             "messages": messages + [AIMessage(content=reply)],
         }
 
-    # ── EMERGENCY: critical symptoms ──
-    if any(x in text for x in [
-        # breathing
-        "can't breathe", "cannot breathe", "breathing difficulty", "shortness of breath", "choking",
-        # heart
-        "chest pain", "heart attack", "heart failure", "palpitations", "irregular heartbeat",
-        # consciousness
-        "faint", "fainting", "unconscious", "passed out", "unresponsive", "collapsed",
-        # bleeding
-        "bleeding heavily", "heavy bleeding", "blood loss", "hemorrhage", "bleeding won't stop",
-        # brain
-        "stroke", "seizure", "convulsion", "paralysis", "sudden numbness", "can't speak",
-        # overdose / poisoning
-        "overdose", "poisoning", "swallowed poison", "took too many pills",
-        # trauma
-        "accident", "head injury", "broken bone", "deep cut", "severe burn",
-        # other critical
-        "suicide", "kill myself", "self harm", "allergic reaction", "anaphylaxis", "swelling throat",
-    ]):
-        return {"intent": "emergency", "message_count": count}
-
-    # ── DATA QUERY: user explicitly asking for doctors/medicines from DB ──
-    # FIX: "medicine", "medicines" hata diye — ye words medical advice mein bhi aate hain
-    # sirf explicit DB intent wale words rakhe
+    # ── DATA QUERY: explicit DB intent ──
     if any(x in text for x in [
         "doctor dhundo", "find doctor", "find medicine",
         "price batao", "price of", "kitne ka",
@@ -117,20 +119,19 @@ def router_node(state: AgentState):
 def clarification_node(state: AgentState):
     messages              = state.get("messages", [])
     session_id            = state.get("session_id", "default")
+    incognito             = state.get("incognito", False)
     clarification_step    = state.get("clarification_step", 0)
     clarification_answers = state.get("clarification_answers", {}) or {}
 
     user_input = messages[-1].content if messages else ""
 
-    # ── Step 0: Generate MAX 1 question, only if query is too vague ──
-    # FIX: pehle 2 questions force karta tha, ab LLM khud decide karta hai
-    # clear query hai toh seedha answer, vague hai toh 1 question
+    # ── Step 0: Generate at most 1 question only if query is too vague ──
     if clarification_step == 0:
         gen_prompt = ChatPromptTemplate.from_messages([
             ("system", """You are HealthPilot AI.
 User described a health concern. Generate exactly 1 short, focused clarifying question.
 Only ask if the query is too vague to answer safely (e.g. just "pain" or "problem").
-If query is clear enough, return: {{"questions": []}}
+If the query is already clear enough, return: {{"questions": []}}
 Return ONLY valid JSON: {{"questions": ["Q1"]}}
 No explanation outside JSON."""),
             ("user", "{complaint}")
@@ -144,7 +145,7 @@ No explanation outside JSON."""),
         except Exception:
             questions = ["How long have you been experiencing this, and where exactly?"]
 
-        # Query clear hai — skip clarification, direct answer dedo
+        # Query is clear — skip clarification
         if not questions:
             return {
                 "clarification_needed":    False,
@@ -153,7 +154,8 @@ No explanation outside JSON."""),
             }
 
         reply = questions[0]
-        save_message(session_id, "assistant", reply)
+        if not incognito:
+            save_message(session_id, "assistant", reply)
 
         return {
             "messages":                messages + [AIMessage(content=reply)],
@@ -163,8 +165,7 @@ No explanation outside JSON."""),
             "clarification_answers":   {},
         }
 
-    # ── Step 1: User ne jawab diya — bas, answer karo ──
-    # FIX: pehle Step 1 → Step 2 tha (2 questions), ab Step 1 ke baad seedha done
+    # ── Step 1: User answered — proceed to RAG ──
     elif clarification_step == 1:
         clarification_answers["q1"] = user_input
         return {
@@ -187,13 +188,14 @@ def summarization_node(state: AgentState):
     existing_summary = state.get("conversation_summary", "") or ""
     messages         = state.get("messages", [])
 
-    if message_count < 2:
+    # Need at least 4 messages before summarizing
+    if message_count < SUMMARIZE_EVERY:
         print(f"[Summarizer] Skipping — not enough messages: {message_count}")
         return {}
 
     should_summarize = (
         message_count % SUMMARIZE_EVERY == 0
-        or (not existing_summary and message_count >= 2)
+        or (not existing_summary and message_count >= SUMMARIZE_EVERY)
     )
 
     if not should_summarize:
@@ -246,6 +248,7 @@ Return ONLY the updated bullet-point summary. No preamble. No extra text."""
 
 def safety_node(state: AgentState):
     session_id = state.get("session_id", "default")
+    incognito  = state.get("incognito", False)
     intent     = state.get("intent")
 
     if intent == "emergency":
@@ -257,10 +260,11 @@ def safety_node(state: AgentState):
             "- Ambulance: 108 (India)\n\n"
             "Do not wait — go now or call for help immediately."
         )
-        save_message(session_id, "assistant", reply)
+        if not incognito:
+            save_message(session_id, "assistant", reply)
         return {
             "messages": state.get("messages", []) + [AIMessage(content=reply)],
-            "error": "emergency"
+            "error": "emergency",
         }
 
     return {}
@@ -300,13 +304,13 @@ Return ONLY valid JSON (no explanation, no markdown, no code block):
     "consultation_fee_lte": number or null,
     "specialization": string or null,
     "name": string or null,
+    "availability": string or null,
     "requires_prescription": true or false or null
   }},
   "limit": 10
 }}"""
 
     try:
-        import re, json
         raw     = llm.invoke(planner_prompt).content.strip()
         print(f"[SQL] LLM planner raw output: {raw}")
         cleaned = re.sub(r"```(?:json)?", "", raw).replace("```", "").strip()
@@ -337,6 +341,8 @@ Return ONLY valid JSON (no explanation, no markdown, no code block):
             query = query.ilike("specialization", f"%{filters['specialization']}%")
         if filters.get("name"):
             query = query.ilike("name", f"%{filters['name']}%")
+        if filters.get("availability"):
+            query = query.ilike("availability", f"%{filters['availability']}%")
         if filters.get("requires_prescription") is not None:
             query = query.eq("requires_prescription", filters["requires_prescription"])
 
@@ -352,18 +358,18 @@ Return ONLY valid JSON (no explanation, no markdown, no code block):
             for m in data:
                 rx = "Prescription required" if m.get("requires_prescription") else "OTC"
                 lines.append(
-                    f"• {m['name']} | {m.get('dosage_form','')} | "
-                    f"₹{m.get('price','')} | {rx} | Stock: {m.get('stock_quantity','')}"
+                    f"• {m['name']} | {m.get('dosage_form', '')} | "
+                    f"₹{m.get('price', '')} | {rx} | Stock: {m.get('stock_quantity', '')}"
                 )
             formatted = f"Medicines Found ({len(data)}):\n" + "\n".join(lines)
         else:
             lines = []
             for d in data:
                 lines.append(
-                    f"• {d['name']} | {d.get('specialization','')} | "
-                    f"Fee: ₹{d.get('consultation_fee','')} | "
-                    f"Available: {d.get('availability','')} | "
-                    f"Rating: {d.get('rating','')}/5"
+                    f"• {d['name']} | {d.get('specialization', '')} | "
+                    f"Fee: ₹{d.get('consultation_fee', '')} | "
+                    f"Available: {d.get('availability', '')} | "
+                    f"Rating: {d.get('rating', '')}/5"
                 )
             formatted = f"Doctors Found ({len(data)}):\n" + "\n".join(lines)
 
@@ -406,7 +412,8 @@ def rag_node(state: AgentState):
     try:
         docs    = retriever.invoke(full_query)
         context = "\n\n".join([d.page_content for d in docs]) if docs else ""
-    except Exception:
+    except Exception as e:
+        print(f"[RAG] Retriever error: {e}")
         docs    = []
         context = ""
 
@@ -428,14 +435,30 @@ def web_search_node(state: AgentState):
         return {}
 
     query = messages[-1].content
-    tool  = get_search_tool()
 
     try:
-        results   = tool.invoke(query)[:5]
+        tool    = get_search_tool()
+        raw     = tool.invoke(query)
+
+        # Tavily can return a list of dicts or a single dict with "results" key
+        if isinstance(raw, dict):
+            results = raw.get("results", [])
+        elif isinstance(raw, list):
+            results = raw
+        else:
+            results = []
+
+        results = results[:5]
+
         formatted = "\n".join([
-            f"- {r.get('content', '')} ({r.get('url', '')})"
+            f"- {r.get('content', r.get('snippet', ''))} ({r.get('url', '')})"
             for r in results
+            if isinstance(r, dict)
         ])
+
+        if not formatted:
+            formatted = "No relevant web results found."
+
     except Exception as e:
         formatted = f"Web search error: {str(e)}"
 
@@ -449,6 +472,7 @@ def web_search_node(state: AgentState):
 def response_node(state: AgentState):
     messages   = state.get("messages", [])
     session_id = state.get("session_id", "default")
+    incognito  = state.get("incognito", False)
     intent     = state.get("intent", "") or ""
 
     if not messages:
@@ -508,8 +532,6 @@ TONE: Confident, brief, helpful — like a pharmacist giving a quick answer.
 LANGUAGE: Match user's language/style exactly (Hindi, English, Hinglish — mirror it).
 """
     else:
-        # FIX: "Thanks/ok" pe bhi agar general_info se aa jaye toh short reply dega
-        # "If user says thanks or acknowledges" rule add kiya
         system_prompt = """You are HealthPilot AI — a sharp, experienced doctor giving quick clinic-style advice.
 
 RULES:
@@ -542,7 +564,7 @@ LANGUAGE: Mirror the user exactly — Hinglish, Hindi, English, whatever they us
 
     response = chain.invoke({
         "context": context_str,
-        "input": user_input
+        "input": user_input,
     })
 
     print(f"\n{'='*50}")
@@ -550,5 +572,7 @@ LANGUAGE: Mirror the user exactly — Hinglish, Hindi, English, whatever they us
     print(response)
     print(f"{'='*50}\n")
 
-    save_message(session_id, "assistant", response)
+    if not incognito:
+        save_message(session_id, "assistant", response)
+
     return {"messages": messages + [AIMessage(content=response)]}

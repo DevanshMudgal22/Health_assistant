@@ -16,20 +16,20 @@ def define_graph():
     """
 HealthPilot AI — LangGraph Workflow
 
-UPDATED FLOW:
+FLOW:
 ┌─────────┐
 │  router │
 └────┬────┘
      │
-┌────▼──────────────────────────────────────────────┐
-│  emergency → safety → END                         │
-│  data_query → sql_agent → response → summarization → END      
-│  general_info → web_search → response → summarization → END   
-│  medical_advice → clarification_node              │
-│       ├─ still clarifying → END (ask Q)           │
-│       └─ done → summarization → rag               │
-│                              → response → summarization → END 
-└───────────────────────────────────────────────────┘
+┌────▼──────────────────────────────────────────────────────────┐
+│  greeting_done → END  (reply already in messages)             │
+│  emergency     → safety → END                                 │
+│  data_query    → sql_agent → response → END                   │
+│  general_info  → web_search → response → END                  │
+│  medical_advice → clarification                               │
+│       ├─ still clarifying → END (bot asked a question)        │
+│       └─ done → summarization → rag → response → END          │
+└───────────────────────────────────────────────────────────────┘
 """
 
     workflow = StateGraph(AgentState)
@@ -50,8 +50,13 @@ UPDATED FLOW:
     # =====================================================
     # ROUTER → BRANCH DECISION
     # =====================================================
-    def router_decision(state: AgentState):
+
+    def router_decision(state: AgentState) -> str:
         intent = (state.get("intent") or "").lower()
+
+        if intent == "greeting_done":
+            # Reply already appended to messages in router_node — stop here
+            return "end"
 
         if intent == "emergency":
             return "safety"
@@ -69,6 +74,7 @@ UPDATED FLOW:
         "router",
         router_decision,
         {
+            "end":           END,
             "safety":        "safety",
             "sql_agent":     "sql_agent",
             "clarification": "clarification",
@@ -77,54 +83,43 @@ UPDATED FLOW:
     )
 
     # =====================================================
-    # SAFETY → STOP OR CONTINUE
+    # SAFETY → END (emergency always stops here)
     # =====================================================
-    def safety_decision(state: AgentState):
-        error = (state.get("error") or "").lower()
-        if "emergency" in error:
-            return END
-        return "response"
-
-    workflow.add_conditional_edges(
-        "safety",
-        safety_decision,
-        {END: END, "response": "response"},
-    )
+    # Safety node sets error="emergency" — always terminate after safety reply
+    workflow.add_edge("safety", END)
 
     # =====================================================
     # CLARIFICATION → STILL ASKING OR DONE
     # =====================================================
-    def clarification_decision(state: AgentState):
-        """
-        If clarification is still needed → stop (bot asked a question).
-        If clarification is done → move to summarization then RAG.
-        """
+
+    def clarification_decision(state: AgentState) -> str:
         still_clarifying = state.get("clarification_needed", False)
-
         if still_clarifying:
-            # Bot asked a question — wait for user reply
-            return END
-
-        # All answers collected — proceed to summarize + RAG
+            # Bot asked a question — wait for next user turn
+            return "end"
+        # All info collected — summarize conversation then run RAG
         return "summarization"
 
     workflow.add_conditional_edges(
         "clarification",
         clarification_decision,
-        {END: END, "summarization": "summarization"},
+        {
+            "end":           END,
+            "summarization": "summarization",
+        },
     )
 
     # =====================================================
-    # SUMMARIZATION → RAG
+    # SUMMARIZATION → RAG → RESPONSE → END
     # =====================================================
     workflow.add_edge("summarization", "rag")
+    workflow.add_edge("rag",           "response")
 
     # =====================================================
-    # ALL PATHS → RESPONSE → END
+    # sql_agent / web_search → RESPONSE → END
     # =====================================================
     workflow.add_edge("sql_agent",  "response")
     workflow.add_edge("web_search", "response")
-    workflow.add_edge("rag",        "response")
-
+    workflow.add_edge("response",   END)
 
     return workflow.compile()
