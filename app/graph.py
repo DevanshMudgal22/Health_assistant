@@ -117,7 +117,7 @@ UPDATED FLOW:
     # =====================================================
     # SUMMARIZATION → RAG
     # =====================================================
-    #workflow.add_edge("summarization", "rag")
+    workflow.add_edge("summarization", "rag")
 
     # =====================================================
     # ALL PATHS → RESPONSE → END
@@ -125,7 +125,6 @@ UPDATED FLOW:
     workflow.add_edge("sql_agent",  "response")
     workflow.add_edge("web_search", "response")
     workflow.add_edge("rag",        "response")
-    workflow.add_edge("response", "summarization")
-    workflow.add_edge("summarization", END)  
+
 
     return workflow.compile()

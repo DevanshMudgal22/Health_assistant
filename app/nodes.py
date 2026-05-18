@@ -35,7 +35,7 @@ def router_node(state: AgentState):
 
     # ── GREETING: exact word match to avoid false triggers (e.g. "history", "thigh") ──
     greeting_words = ["hi", "hello", "hey", "hii", "helo", "hlo"]
-    if any(x == text or x in text.split() for x in greeting_words) or "how are you" in text:
+    if any(text == x or text.startswith(x) for x in greeting_words) or "how are you" in text:
         reply = "👋 Hello! Main HealthPilot AI hoon — aapka personal health assistant.\n\nAaj main aapki kya madad kar sakta hoon? Apni problem batayein. 🩺"
         incognito = state.get("incognito", False)
         if not incognito:
@@ -391,7 +391,7 @@ def rag_node(state: AgentState):
         return {}
 
     original_complaint = ""
-    for m in messages:
+    for m in reversed(messages):
         if isinstance(m, HumanMessage):
             original_complaint = m.content
             break
