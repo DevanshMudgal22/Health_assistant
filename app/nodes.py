@@ -28,12 +28,14 @@ def router_node(state: AgentState):
     if not messages:
         return {"intent": "general_info"}
 
-    text = messages[-1].content.lower()
+    text = messages[-1].content.lower().strip()
 
     save_message(session_id, "user", messages[-1].content)
     count = get_message_count(session_id)
 
-    if any(x in text for x in ["hi", "hello", "hey", "how are you", "hii", "helo", "hlo"]):
+    # ── GREETING: exact word match to avoid false triggers (e.g. "history", "thigh") ──
+    greeting_words = ["hi", "hello", "hey", "hii", "helo", "hlo"]
+    if any(x == text or x in text.split() for x in greeting_words) or "how are you" in text:
         reply = "👋 Hello! Main HealthPilot AI hoon — aapka personal health assistant.\n\nAaj main aapki kya madad kar sakta hoon? Apni problem batayein. 🩺"
         incognito = state.get("incognito", False)
         if not incognito:
@@ -44,34 +46,58 @@ def router_node(state: AgentState):
             "messages": messages + [AIMessage(content=reply)],
         }
 
+    # ── ACKNOWLEDGEMENT: thanks, ok, accha — short reply, no LLM needed ──
+    # FIX: "Thanks" pe bekar generic response aata tha, ab short warm reply dega
     if any(x in text for x in [
-    # breathing
-    "can't breathe", "cannot breathe", "breathing difficulty", "shortness of breath", "choking",
-    # heart
-    "chest pain", "heart attack", "heart failure", "palpitations", "irregular heartbeat",
-    # consciousness
-    "faint", "fainting", "unconscious", "passed out", "unresponsive", "collapsed",
-    # bleeding
-    "bleeding heavily", "heavy bleeding", "blood loss", "hemorrhage", "bleeding won't stop",
-    # brain
-    "stroke", "seizure", "convulsion", "paralysis", "sudden numbness", "can't speak",
-    # overdose / poisoning
-    "overdose", "poisoning", "swallowed poison", "took too many pills",
-    # trauma
-    "accident", "head injury", "broken bone", "deep cut", "severe burn",
-    # other critical
-    "suicide", "kill myself", "self harm", "allergic reaction", "anaphylaxis", "swelling throat",
-]):
+        "thanks", "thank you", "ok", "okay", "got it",
+        "sure", "alright", "thik hai", "shukriya",
+        "theek", "accha", "haan", "👍", "hmm", "fine",
+        "bahut acha", "perfect", "great", "awesome",
+    ]):
+        reply = "😊 Koi baat nahi! Kuch aur poochna ho toh batao."
+        save_message(session_id, "assistant", reply)
+        return {
+            "intent": "greeting_done",
+            "message_count": count,
+            "messages": messages + [AIMessage(content=reply)],
+        }
+
+    # ── EMERGENCY: critical symptoms ──
+    if any(x in text for x in [
+        # breathing
+        "can't breathe", "cannot breathe", "breathing difficulty", "shortness of breath", "choking",
+        # heart
+        "chest pain", "heart attack", "heart failure", "palpitations", "irregular heartbeat",
+        # consciousness
+        "faint", "fainting", "unconscious", "passed out", "unresponsive", "collapsed",
+        # bleeding
+        "bleeding heavily", "heavy bleeding", "blood loss", "hemorrhage", "bleeding won't stop",
+        # brain
+        "stroke", "seizure", "convulsion", "paralysis", "sudden numbness", "can't speak",
+        # overdose / poisoning
+        "overdose", "poisoning", "swallowed poison", "took too many pills",
+        # trauma
+        "accident", "head injury", "broken bone", "deep cut", "severe burn",
+        # other critical
+        "suicide", "kill myself", "self harm", "allergic reaction", "anaphylaxis", "swelling throat",
+    ]):
         return {"intent": "emergency", "message_count": count}
 
+    # ── DATA QUERY: user explicitly asking for doctors/medicines from DB ──
+    # FIX: "medicine", "medicines" hata diye — ye words medical advice mein bhi aate hain
+    # sirf explicit DB intent wale words rakhe
     if any(x in text for x in [
-        "doctor", "doctors", "medicine", "medicines",
-        "price", "rs", "₹", "show", "list", "available",
-        "stock", "cost", "fee", "specialization", "specialist",
-        "book", "appointment", "find doctor", "find medicine",
+        "doctor dhundo", "find doctor", "find medicine",
+        "price batao", "price of", "kitne ka",
+        "₹", "stock hai", "available hai",
+        "book appointment", "doctor chahiye",
+        "show medicines", "list medicines",
+        "fee kitna", "consultation fee",
+        "specialist chahiye", "specialization",
     ]):
         return {"intent": "data_query", "message_count": count}
 
+    # ── MEDICAL ADVICE: symptoms and health concerns ──
     if any(x in text for x in [
         "fever", "allergy", "pain", "cold", "cough", "headache",
         "diabetes", "blood pressure", "stomach", "vomiting",
@@ -89,14 +115,16 @@ def router_node(state: AgentState):
 # =====================================================
 
 def clarification_node(state: AgentState):
-    messages                = state.get("messages", [])
-    session_id              = state.get("session_id", "default")
-    clarification_step      = state.get("clarification_step", 0)
-    clarification_answers   = state.get("clarification_answers", {}) or {}
+    messages              = state.get("messages", [])
+    session_id            = state.get("session_id", "default")
+    clarification_step    = state.get("clarification_step", 0)
+    clarification_answers = state.get("clarification_answers", {}) or {}
 
     user_input = messages[-1].content if messages else ""
 
-    # ── Step 0: Generate 1 question ──
+    # ── Step 0: Generate MAX 1 question, only if query is too vague ──
+    # FIX: pehle 2 questions force karta tha, ab LLM khud decide karta hai
+    # clear query hai toh seedha answer, vague hai toh 1 question
     if clarification_step == 0:
         gen_prompt = ChatPromptTemplate.from_messages([
             ("system", """You are HealthPilot AI.
@@ -116,11 +144,11 @@ No explanation outside JSON."""),
         except Exception:
             questions = ["How long have you been experiencing this, and where exactly?"]
 
-        # Query clear hai — skip clarification, direct answer
+        # Query clear hai — skip clarification, direct answer dedo
         if not questions:
             return {
-                "clarification_needed": False,
-                "clarification_step":   0,
+                "clarification_needed":    False,
+                "clarification_step":      0,
                 "clarification_questions": [],
             }
 
@@ -135,7 +163,8 @@ No explanation outside JSON."""),
             "clarification_answers":   {},
         }
 
-    # ── Step 1: User ne jawab diya — done, answer do ──
+    # ── Step 1: User ne jawab diya — bas, answer karo ──
+    # FIX: pehle Step 1 → Step 2 tha (2 questions), ab Step 1 ke baad seedha done
     elif clarification_step == 1:
         clarification_answers["q1"] = user_input
         return {
@@ -154,13 +183,10 @@ No explanation outside JSON."""),
 def summarization_node(state: AgentState):
     session_id = state.get("session_id", "default")
 
-    # ✅ FIX 1: ALWAYS get fresh message count from DB (state value is stale)
-    message_count = get_message_count(session_id)
-
+    message_count    = get_message_count(session_id)
     existing_summary = state.get("conversation_summary", "") or ""
-    messages = state.get("messages", [])
+    messages         = state.get("messages", [])
 
-    # Avoid summarizing too early
     if message_count < 2:
         print(f"[Summarizer] Skipping — not enough messages: {message_count}")
         return {}
@@ -176,15 +202,12 @@ def summarization_node(state: AgentState):
 
     print(f"[Summarizer] Generating summary at message count: {message_count}")
 
-    # ✅ FIX 2: safe slicing (avoid empty issues)
     recent_msgs = messages[-SUMMARIZE_EVERY:] if messages else []
-
     recent_text = "\n".join([
         f"{m.type.upper()}: {m.content}"
         for m in recent_msgs
     ])
 
-    # ✅ FIX 3: guard against empty content
     if not recent_text.strip():
         print("[Summarizer] Skipping — no valid recent text")
         return {}
@@ -209,14 +232,11 @@ Return ONLY the updated bullet-point summary. No preamble. No extra text."""
         print(f"[Summarizer] Error: {e}")
         return {}
 
-    # ✅ FIX 4: ensure summary is not empty before saving
     if not new_summary:
         print("[Summarizer] Empty summary — skipping save")
         return {}
 
-    # Save to Supabase
     save_summary(session_id, new_summary, message_count)
-
     return {"conversation_summary": new_summary}
 
 
@@ -434,9 +454,6 @@ def response_node(state: AgentState):
     if not messages:
         return {}
 
-    # ✅ FIX 1 (CRITICAL):
-    # ALWAYS use the latest user message
-    # (previous logic was picking first message → caused "Hello reset")
     user_input = ""
     for m in reversed(messages):
         if isinstance(m, HumanMessage):
@@ -455,17 +472,13 @@ def response_node(state: AgentState):
 
     if summary:
         context_parts.append(f"Conversation Summary:\n{summary}")
-
     if clarification:
         answers_text = "\n".join([f"- {v}" for v in clarification.values()])
         context_parts.append(f"User Info:\n{answers_text}")
-
     if sql_result:
         context_parts.append(f"DATABASE RESULTS (use these exactly):\n{sql_result}")
-
     if rag_context:
         context_parts.append(f"Medical Knowledge:\n{rag_context}")
-
     if web_context:
         context_parts.append(f"Web Results:\n{web_context}")
 
@@ -495,10 +508,13 @@ TONE: Confident, brief, helpful — like a pharmacist giving a quick answer.
 LANGUAGE: Match user's language/style exactly (Hindi, English, Hinglish — mirror it).
 """
     else:
+        # FIX: "Thanks/ok" pe bhi agar general_info se aa jaye toh short reply dega
+        # "If user says thanks or acknowledges" rule add kiya
         system_prompt = """You are HealthPilot AI — a sharp, experienced doctor giving quick clinic-style advice.
 
 RULES:
 - Answer directly. No greetings, no clarifying questions, no rephrasing the user's words back.
+- If user says thanks, ok, or acknowledges — reply with one short warm line only. Nothing else.
 - Health topics only. Off-topic? One line decline, nothing more.
 - Never say "consult a doctor", "I'm an AI", or add disclaimers.
 - Never invent facts. If unsure, say so in one line.
@@ -535,5 +551,4 @@ LANGUAGE: Mirror the user exactly — Hinglish, Hindi, English, whatever they us
     print(f"{'='*50}\n")
 
     save_message(session_id, "assistant", response)
-
     return {"messages": messages + [AIMessage(content=response)]}
